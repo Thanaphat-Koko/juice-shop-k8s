@@ -1,3 +1,165 @@
+# AWS EKS Architecture Diagram - OWASP Juice Shop
+
+## โครงสร้างและ Flow การทำงานของ Kubernetes บน AWS EKS
+
+```mermaid
+graph TB
+    subgraph Internet["🌐 Internet"]
+        User["👤 Users"]
+    end
+
+    subgraph AWS["☁️ AWS Cloud"]
+        subgraph VPC["VPC"]
+            ALB["🔄 Application Load Balancer<br/>(Internet-facing)"]
+            
+            subgraph EKS["Amazon EKS Cluster"]
+                subgraph NS["📦 Namespace: juice-shop"]
+                    ING["🚪 Ingress<br/>AWS ALB Controller<br/>Path: /*"]
+                    SVC["🔗 Service<br/>Type: ClusterIP<br/>Port: 80 → 3000"]
+                    
+                    subgraph Deployment["📋 Deployment: juice-shop"]
+                        POD1["🐳 Pod 1<br/>juice-shop:latest<br/>Port: 3000"]
+                        POD2["🐳 Pod 2<br/>juice-shop:latest<br/>Port: 3000"]
+                        PODN["🐳 Pod N<br/>...<br/>(Auto-scaled)"]
+                    end
+                    
+                    HPA["📈 HPA<br/>Min: 2 | Max: 10<br/>CPU: 70% | Memory: 80%"]
+                    NP["🛡️ NetworkPolicy<br/>Ingress: TCP 3000<br/>Egress: DNS, HTTP/S"]
+                end
+            end
+        end
+    end
+
+    User -->|"HTTP/HTTPS"| ALB
+    ALB -->|"Forward"| ING
+    ING -->|"Route /"| SVC
+    SVC -->|"Load Balance"| POD1
+    SVC -->|"Load Balance"| POD2
+    SVC -->|"Load Balance"| PODN
+    HPA -.->|"Scale"| Deployment
+    NP -.->|"Protect"| Deployment
+```
+
+---
+
+## Request Flow (การไหลของ Request)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 👤 User
+    participant ALB as 🔄 AWS ALB
+    participant ING as 🚪 Ingress
+    participant SVC as 🔗 Service
+    participant POD as 🐳 Pod
+
+    U->>ALB: HTTP Request
+    Note over ALB: Health Check:<br/>/rest/admin/application-version
+    ALB->>ING: Forward Request
+    ING->>SVC: Route to Service (port 80)
+    SVC->>POD: Load Balance to Pod (port 3000)
+    POD-->>SVC: Response
+    SVC-->>ING: Response
+    ING-->>ALB: Response
+    ALB-->>U: HTTP Response
+```
+
+---
+
+## Component Details (รายละเอียด Components)
+
+| Component | File | Description |
+|-----------|------|-------------|
+| **Namespace** | `namespace.yaml` | สร้าง namespace `juice-shop` พร้อม labels |
+| **Deployment** | `deployment.yaml` | Deploy Juice Shop containers (2 replicas, RollingUpdate) |
+| **Service** | `service.yaml` | ClusterIP service, port 80 → 3000 |
+| **Ingress** | `ingress.yaml` | AWS ALB Ingress, internet-facing |
+| **HPA** | `hpa.yaml` | Auto-scale 2-10 pods based on CPU/Memory |
+| **NetworkPolicy** | `networkpolicy.yaml` | จำกัด traffic เข้า-ออก pods |
+| **Kustomization** | `kustomization.yaml` | จัดการ deployment ทั้งหมด |
+
+---
+
+## Auto-Scaling Behavior
+
+```mermaid
+graph LR
+    subgraph HPA["Horizontal Pod Autoscaler"]
+        CPU["CPU > 70%"] --> ScaleUp["⬆️ Scale Up<br/>+100% หรือ +4 pods<br/>ทุก 15 วินาที"]
+        MEM["Memory > 80%"] --> ScaleUp
+        LOW["Load ลดลง"] --> ScaleDown["⬇️ Scale Down<br/>-50%<br/>รอ 5 นาที"]
+    end
+    
+    ScaleUp --> Pods["2-10 Pods"]
+    ScaleDown --> Pods
+```
+
+---
+
+## Network Policy Flow
+
+```mermaid
+graph LR
+    subgraph Ingress["📥 Allowed Ingress"]
+        ALB2["Any Source"] -->|"TCP 3000"| Pod["🐳 Juice Shop Pod"]
+    end
+    
+    subgraph Egress["📤 Allowed Egress"]
+        Pod -->|"UDP/TCP 53"| DNS["DNS Resolution"]
+        Pod -->|"TCP 80/443"| ExtAPI["External APIs<br/>(npm, etc.)"]
+    end
+```
+
+---
+
+## Deployment Strategy
+
+```mermaid
+graph LR
+    subgraph RollingUpdate["🔄 Rolling Update Strategy"]
+        V1["v1 Pod 1"] --> V2_1["v2 Pod 1"]
+        V1_2["v1 Pod 2"] --> V2_2["v2 Pod 2"]
+    end
+    
+    MaxSurge["maxSurge: 1<br/>(+1 pod ขณะ update)"]
+    MaxUnavail["maxUnavailable: 0<br/>(ไม่มี downtime)"]
+```
+
+---
+
+## Resource Configuration
+
+| Resource | Request | Limit |
+|----------|---------|-------|
+| **CPU** | 100m | 500m |
+| **Memory** | 256Mi | 512Mi |
+
+## Health Checks
+
+| Probe | Path | Interval | Timeout |
+|-------|------|----------|---------|
+| **Liveness** | `/rest/admin/application-version` | 10s | 5s |
+| **Readiness** | `/rest/admin/application-version` | 5s | 3s |
+
+---
+
+## Kustomize Deployment Order
+
+```mermaid
+graph TD
+    K["kustomization.yaml"] --> NS["1. namespace.yaml"]
+    NS --> DEP["2. deployment.yaml"]
+    DEP --> SVC2["3. service.yaml"]
+    SVC2 --> ING2["4. ingress.yaml"]
+    ING2 --> HPA2["5. hpa.yaml"]
+    HPA2 --> NP2["6. networkpolicy.yaml"]
+```
+
+**Deploy Command:**
+```bash
+kubectl apply -k .
+```
+
 # OWASP Juice Shop - AWS EKS Deployment Guide
 
 This guide provides step-by-step instructions to deploy OWASP Juice Shop on AWS EKS (Elastic Kubernetes Service).
