@@ -57,8 +57,6 @@ spec:
             - name: NODE_ENV
               value: "production"
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 1000
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
             capabilities:
