@@ -1,5 +1,49 @@
 # AWS EKS Architecture Diagram - OWASP Juice Shop
 
+flowchart TB
+    subgraph AWS["☁️ AWS Cloud (ap-southeast-1)"]
+        subgraph VPC["🔒 VPC"]
+            subgraph EKS["🎯 EKS Cluster: juice-shop-cluster"]
+                direction TB
+                CP["🧠 Control Plane<br/>Kubernetes v1.34<br/>(Managed by AWS)"]
+                
+                subgraph NG["📦 Managed Node Group: juice-shop-nodes"]
+                    direction LR
+                    N1["🖥️ Node 1<br/>t3.medium"]
+                    N2["🖥️ Node 2<br/>t3.medium"]
+                    N3["🖥️ Node 3<br/>(Auto-scale)"]
+                    N4["🖥️ Node 4<br/>(Auto-scale)"]
+                end
+                
+                CP --> NG
+            end
+            
+            subgraph Subnets["🌐 Subnets"]
+                PubSub1["Public Subnet AZ-a"]
+                PubSub2["Public Subnet AZ-b"]
+                PriSub1["Private Subnet AZ-a"]
+                PriSub2["Private Subnet AZ-b"]
+            end
+        end
+        
+        IAM["🔐 IAM Roles"]
+        SG["🛡️ Security Groups"]
+    end
+    
+    User["👤 User / kubectl"] --> CP
+    IAM --> EKS
+    SG --> NG
+    NG --> Subnets
+
+    style AWS fill:#232f3e,color:#fff
+    style EKS fill:#ff9900,color:#000
+    style NG fill:#1e8900,color:#fff
+    style CP fill:#527fff,color:#fff
+    style N1 fill:#7aa116,color:#fff
+    style N2 fill:#7aa116,color:#fff
+    style N3 fill:#7aa116,color:#fff,stroke-dasharray: 5 5
+    style N4 fill:#7aa116,color:#fff,stroke-dasharray: 5 5
+
 ## โครงสร้างและ Flow การทำงานของ Kubernetes บน AWS EKS
 
 ```mermaid
@@ -192,7 +236,7 @@ Create a new EKS cluster using eksctl:
 eksctl create cluster \
   --name juice-shop-cluster \
   --region ap-southeast-1 \
-  --version 1.28 \
+  --version 1.34 \
   --nodegroup-name juice-shop-nodes \
   --node-type t3.medium \
   --nodes 2 \
