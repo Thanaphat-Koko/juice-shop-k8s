@@ -1,0 +1,29 @@
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: juice-shop-backend-config
+  namespace: juice-shop
+  labels:
+    app: juice-shop
+spec:
+  healthCheck:
+    checkIntervalSec: 30
+    timeoutSec: 5
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+    type: HTTP
+    requestPath: /rest/admin/application-version
+    port: 3000
+  # Enable Cloud CDN (optional)
+  # cdn:
+  #   enabled: true
+  #   cachePolicy:
+  #     includeHost: true
+  #     includeProtocol: true
+  #     includeQueryString: false
+  # Connection draining settings
+  connectionDraining:
+    drainingTimeoutSec: 30
+  # Session affinity (optional)
+  # sessionAffinity:
+  #   affinityType: "CLIENT_IP"

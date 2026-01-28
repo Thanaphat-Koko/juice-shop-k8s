@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: juice-shop
+  namespace: juice-shop
+  labels:
+    app: juice-shop
+  annotations:
+    # GCP GKE Ingress Controller annotations
+    kubernetes.io/ingress.class: gce
+    kubernetes.io/ingress.global-static-ip-name: juice-shop-ip
+    # Uncomment the following for HTTPS (requires Google-managed SSL certificate)
+    # networking.gke.io/managed-certificates: juice-shop-cert
+    # kubernetes.io/ingress.allow-http: "false"
+spec:
+  defaultBackend:
+    service:
+      name: juice-shop
+      port:
+        number: 80
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: juice-shop
+                port:
+                  number: 80

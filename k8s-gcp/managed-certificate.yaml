@@ -1,0 +1,10 @@
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: juice-shop-cert
+  namespace: juice-shop
+  labels:
+    app: juice-shop
+spec:
+  domains:
+    - your-domain.example.com
