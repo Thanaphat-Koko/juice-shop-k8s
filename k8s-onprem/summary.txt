@@ -1,0 +1,330 @@
+================================================================================
+  JUICE SHOP ON-PREMISE K8S DEPLOYMENT — ERROR SUMMARY & FIX GUIDE
+  Cluster: kubernetes (k8s-master1-ncs-yipintsoigroup-com)
+  Date: 2026-03-05
+================================================================================
+
+--------------------------------------------------------------------------------
+ERROR 1: istio-init CrashLoopBackOff — iptables NAT table unavailable
+--------------------------------------------------------------------------------
+SYMPTOM:
+  Pod status: Init:CrashLoopBackOff
+  Log: "iptables-restore: unable to initialize table 'nat'"
+  Container: istio-init (injected by Istio MutatingWebhook)
+
+ROOT CAUSE:
+  The default Istio sidecar injection adds an `istio-init` init container that
+  uses iptables-restore to set up traffic interception. CentOS Stream 9 nodes
+  use the nf_tables backend; the `iptable_nat` legacy kernel module is not
+  loaded, so iptables-restore fails immediately.
+
+FIX:
+  Enable the Istio CNI plugin. The CNI DaemonSet intercepts traffic at the
+  node level (where kernel modules are always available), removing the need
+  for the istio-init init container entirely.
+
+  Step 1 — Pre-create /var/run/istio-cni/ on all nodes:
+    kubectl apply -f prerequisites/node-prep.yaml
+    kubectl rollout status daemonset/istio-cni-node-prep -n istio-system
+
+  Step 2 — Install/upgrade Istio with CNI enabled:
+    istioctl install -f prerequisites/istio-cni.yaml -y
+    # or if already installed:
+    istioctl upgrade -f prerequisites/istio-cni.yaml -y
+
+  File: prerequisites/istio-cni.yaml
+    Key settings:
+      components.cni.enabled: true
+      values.cni.privileged: true    ← required (see Error 2)
+
+--------------------------------------------------------------------------------
+ERROR 2: istio-cni-node DaemonSet CrashLoopBackOff — UDS socket permission denied
+--------------------------------------------------------------------------------
+SYMPTOM:
+  Pod status: CrashLoopBackOff (istio-cni-node pods, all nodes)
+  Log: "failed to listen on unix socket /var/run/istio-cni/log.sock:
+        bind: permission denied"
+  InitExitCode: 126
+
+ROOT CAUSE:
+  The istio-cni-node container tries to bind a Unix Domain Socket at
+  /var/run/istio-cni/log.sock on the HOST filesystem. Two sub-problems:
+    a) /var/run/istio-cni/ directory does not exist on CentOS nodes.
+    b) The container was not running as privileged, so the container runtime
+       blocked host filesystem socket creation on a hardened kernel.
+
+FIX:
+  a) Deploy node-prep DaemonSet to create the directory on all nodes BEFORE
+     the CNI pods start:
+       kubectl apply -f prerequisites/node-prep.yaml
+
+  b) Set privileged: true in the CNI IstioOperator config:
+       values.cni.privileged: true
+     (already included in prerequisites/istio-cni.yaml)
+
+  File: prerequisites/node-prep.yaml
+    Runs a privileged busybox init container on every node that executes:
+      mkdir -p /var/run/istio-cni && chmod 0755 /var/run/istio-cni
+
+--------------------------------------------------------------------------------
+ERROR 3: istioctl upgrade hangs — "Waiting for DaemonSet/istio-cni-node" forever
+--------------------------------------------------------------------------------
+SYMPTOM:
+  istioctl upgrade -f prerequisites/istio-cni.yaml -y
+  Processing resources for CNI. Waiting for DaemonSet/istio-system/istio-cni-node
+  (hangs indefinitely)
+
+  Warning printed by istioctl:
+  "detected Calico CNI with 'bpfConnectTimeLoadBalancing=TCP';
+   this must be set to 'bpfConnectTimeLoadBalancing=Disabled'"
+
+ROOT CAUSE:
+  Calico was running in eBPF dataplane mode with BPF connect-time load
+  balancing enabled (bpfConnectTimeLoadBalancing=TCP). This hooks into the
+  kernel at the BPF layer and rewrites connection destinations BEFORE Istio's
+  iptables rules execute. Istio CNI detects the conflict and refuses to mark
+  its DaemonSet pods Ready, halting the upgrade.
+
+FIX:
+  Disable Calico BPF connect-time load balancing before installing Istio CNI:
+
+    kubectl apply -f prerequisites/calico-felix-config.yaml
+
+  Verify:
+    kubectl get felixconfiguration default \
+      -o jsonpath='{.spec.bpfConnectTimeLoadBalancing}'
+    # Expected: Disabled
+
+  Then re-run:
+    istioctl upgrade -f prerequisites/istio-cni.yaml -y
+
+  File: prerequisites/calico-felix-config.yaml
+    apiVersion: projectcalico.org/v3
+    kind: FelixConfiguration
+    metadata:
+      name: default
+    spec:
+      bpfConnectTimeLoadBalancing: Disabled
+
+--------------------------------------------------------------------------------
+ERROR 4: Juice Shop pods stuck in Init:CrashLoopBackOff after disabling Istio
+--------------------------------------------------------------------------------
+SYMPTOM:
+  Even after removing istio-injection: enabled from namespace,
+  pods still showed 0/2 READY with istio-init + istio-proxy containers.
+
+ROOT CAUSE:
+  The old pods were created BEFORE the namespace label was removed.
+  Kubernetes does not re-evaluate the MutatingWebhook for running pods.
+  The existing pods retained the Istio containers from when they were created.
+
+FIX:
+  Force new pod creation by restarting the deployment:
+    kubectl rollout restart deployment/juice-shop -n juice-shop
+
+  New pods will match the webhook selector check (Istio webhook uses
+  istio.io/rev=default label, which the namespace never had), so they
+  are created without istio-init or istio-proxy.
+
+--------------------------------------------------------------------------------
+ERROR 5: New pod stuck in ContainerCreating — Multi-Attach volume error
+--------------------------------------------------------------------------------
+SYMPTOM:
+  Pod status: ContainerCreating (blocked indefinitely)
+  Event: "Multi-Attach error for volume: Volume is already used by
+          pod juice-shop-55665dcd88-58mbh"
+
+ROOT CAUSE:
+  The PVC was configured as ReadWriteOnce (RWO). During a rolling update,
+  the old pod (in CrashLoopBackOff) still held an exclusive lock on the
+  Longhorn volume. The new pod on a different node could not attach it.
+
+TEMPORARY FIX:
+  Changed PVC to ReadWriteMany (RWX). Longhorn supports RWX natively.
+  Changed deployment maxUnavailable: 0 → 1 to release old pods first.
+
+  (This was later superseded by Error 6 fix — PVC removed entirely)
+
+--------------------------------------------------------------------------------
+ERROR 6: Juice Shop container CrashLoopBackOff — ENOENT missing static files
+--------------------------------------------------------------------------------
+SYMPTOM:
+  Pod starts but immediately crashes.
+  Log: "ENOENT: no such file or directory, copyfile
+        'data/static/botDefaultTrainingData.json'
+        -> 'data/chatbot/botDefaultTrainingData.json'"
+
+ROOT CAUSE:
+  Mounting the Longhorn PVC at /juice-shop/data replaced the ENTIRE data/
+  directory with an empty volume, wiping out data/static/ files that are
+  baked into the container image. The app crashed trying to copy from the
+  now-missing static file on startup.
+
+FIX:
+  Remove the PVC and volume mount from the deployment entirely.
+  Juice Shop is stateless by design — it resets on every restart.
+  There is no need for persistent storage unless using an external database.
+
+  Changes applied:
+    deploy/deployment.yaml   — removed volumeMounts and volumes sections
+    deploy/kustomization.yaml — removed pvc.yaml from resources
+    deploy/pvc.yaml          — kept as reference but excluded from kustomize
+
+  Reapply:
+    kubectl scale deployment juice-shop -n juice-shop --replicas=0
+    kubectl delete pvc juice-shop-data -n juice-shop
+    kubectl apply -k ./deploy/
+    kubectl scale deployment juice-shop -n juice-shop --replicas=2
+
+--------------------------------------------------------------------------------
+ERROR 7: Service type LoadBalancer — MetalLB annotation in wrong field
+--------------------------------------------------------------------------------
+SYMPTOM:
+  kubectl apply error:
+  "strict decoding error: unknown field spec.annotations"
+
+ROOT CAUSE:
+  The MetalLB address-pool annotation was placed under spec.annotations
+  instead of metadata.annotations. The Service spec does not have an
+  annotations field; it is only valid under metadata.
+
+FIX:
+  Moved annotation to the correct location:
+
+  metadata:
+    annotations:
+      metallb.universe.tf/address-pool: default   ← correct
+  spec:
+    type: LoadBalancer
+
+--------------------------------------------------------------------------------
+ERROR 8: MetalLB assigned IP (172.26.5.166) — EXTERNAL-IP pending
+--------------------------------------------------------------------------------
+SYMPTOM:
+  kubectl get svc juice-shop → EXTERNAL-IP: <pending>
+  Event: "Failed to allocate IP: unknown pool 'onprem-pool'"
+
+ROOT CAUSE:
+  The service annotation referenced pool name "onprem-pool" (from the
+  template config), but the actual MetalLB pool on this cluster is named
+  "default" and lives in namespace "metallb", not "metallb-system".
+
+FIX:
+  Updated annotation to match the actual pool:
+    metallb.universe.tf/address-pool: default
+
+  Also corrected prerequisites/metallb-config.yaml:
+    namespace: metallb-system → metallb
+    pool name:  onprem-pool   → default
+    L2Advertisement name: onprem-l2 → l2advertisement1
+
+--------------------------------------------------------------------------------
+ERROR 9: http://172.26.5.166 unreachable — ERR_CONNECTION_TIMED_OUT
+--------------------------------------------------------------------------------
+SYMPTOM:
+  Browser and curl from master node both time out.
+  ARP resolves the VIP correctly from master node.
+  curl from inside the cluster works fine (HTTP 200).
+
+ROOT CAUSE (two layers):
+  Layer A — MetalLB speakers could not form a memberlist quorum:
+    Speaker logs: "Failed to join 172.26.5.87:7946: connection refused"
+                  "Failed to join 172.26.5.88:7946: no route to host"
+    Port 7946 TCP/UDP (MetalLB gossip protocol) was blocked by iptables
+    on all nodes. Without quorum, no single node reliably answers ARP
+    requests for 172.26.5.166, causing intermittent/no connectivity.
+
+  Layer B — Calico NetworkPolicy blocked external traffic:
+    The ingress rule used "from: namespaceSelector: {}" which only allows
+    traffic originating from pods within the cluster.
+    External LoadBalancer traffic arrives with the client/node IP (not a
+    pod IP), so Calico silently dropped every inbound packet.
+
+FIX for Layer A — Open port 7946 on all nodes:
+  Deploy the port-opener DaemonSet (uses alpine with NET_ADMIN capability):
+    cat <<EOF | kubectl apply -f -
+    apiVersion: apps/v1
+    kind: DaemonSet
+    metadata:
+      name: metallb-port-opener
+      namespace: metallb
+    spec:
+      selector:
+        matchLabels:
+          app: metallb-port-opener
+      template:
+        metadata:
+          labels:
+            app: metallb-port-opener
+        spec:
+          hostNetwork: true
+          hostPID: true
+          tolerations:
+            - operator: Exists
+          initContainers:
+            - name: open-ports
+              image: alpine:3.19
+              command:
+                - sh
+                - -c
+                - |
+                  apk add --quiet iptables 2>/dev/null
+                  iptables -C INPUT -p tcp --dport 7946 -j ACCEPT 2>/dev/null \
+                    || iptables -I INPUT -p tcp --dport 7946 -j ACCEPT
+                  iptables -C INPUT -p udp --dport 7946 -j ACCEPT 2>/dev/null \
+                    || iptables -I INPUT -p udp --dport 7946 -j ACCEPT
+              securityContext:
+                privileged: true
+                capabilities:
+                  add: ["NET_ADMIN"]
+          containers:
+            - name: pause
+              image: registry.k8s.io/pause:3.9
+    EOF
+
+  Restart MetalLB speakers after opening the port:
+    kubectl rollout restart daemonset/metallb-speaker -n metallb
+
+FIX for Layer B — Allow external traffic in NetworkPolicy:
+  Changed ingress rule in deploy/networkpolicy.yaml from:
+    from:
+      - namespaceSelector: {}        ← pods only
+  To:
+    from:
+      - ipBlock:
+          cidr: 0.0.0.0/0            ← any source IP (external + pods)
+
+  Apply:
+    kubectl apply -f deploy/networkpolicy.yaml
+
+--------------------------------------------------------------------------------
+FINAL STATE
+--------------------------------------------------------------------------------
+  Juice Shop URL : http://172.26.5.166
+  Namespace      : juice-shop
+  Replicas       : 2 (across worker1 and worker3)
+  Storage        : none (stateless — resets on restart by design)
+  Ingress        : MetalLB LoadBalancer (pool: default, 172.26.5.166)
+  CNI            : Calico (with bpfConnectTimeLoadBalancing=Disabled)
+  Istio          : installed but DISABLED on juice-shop namespace
+                   (re-enable by setting istio-injection: enabled on namespace
+                    and applying deploy/ingress.yaml after fixing CNI issues)
+
+--------------------------------------------------------------------------------
+QUICK RECOVERY COMMANDS
+--------------------------------------------------------------------------------
+  # Re-deploy everything from scratch
+  kubectl apply -f prerequisites/calico-felix-config.yaml
+  kubectl apply -f prerequisites/node-prep.yaml
+  kubectl rollout status daemonset/istio-cni-node-prep -n istio-system
+  istioctl install -f prerequisites/istio-cni.yaml -y
+  kubectl apply -k ./deploy/
+  kubectl apply -f prerequisites/metallb-config.yaml
+
+  # Check status
+  kubectl get pods,svc,pvc -n juice-shop
+  kubectl get ipaddresspool,l2advertisement -n metallb
+
+  # Access
+  curl http://172.26.5.166/rest/admin/application-version
+================================================================================

@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: juice-shop
+  labels:
+    app: juice-shop
+    environment: production
+    # Calico network policy enforcement label
+    networking/policy: calico

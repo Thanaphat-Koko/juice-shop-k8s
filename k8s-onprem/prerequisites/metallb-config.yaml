@@ -1,0 +1,33 @@
+# MetalLB configuration for on-premise Kubernetes
+# Apply AFTER MetalLB is installed: kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.9/config/manifests/metallb-native.yaml
+#
+# Update the addresses below to match your on-premise network range.
+# For L2 mode (simple, no BGP router required), both resources below are needed.
+# For BGP mode, replace L2Advertisement with BGPAdvertisement and add BGPPeer resources.
+---
+# IP address pool that MetalLB will assign to LoadBalancer Services
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: default
+  namespace: metallb
+  labels:
+    app: metallb
+spec:
+  # Replace with your on-premise IP range (must be routable on your LAN)
+  addresses:
+    - 192.168.1.200-192.168.1.220
+  autoAssign: true
+---
+# L2Advertisement advertises the pool IPs over Layer 2 (ARP/NDP)
+# No BGP router required; one node acts as the leader for each IP.
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: l2advertisement1
+  namespace: metallb
+  labels:
+    app: metallb
+spec:
+  ipAddressPools:
+    - default
